@@ -11,7 +11,7 @@ Uses a hybrid approach:
 - **While speaking** — a wave animation shows recording is active
 - **On pause** — `large-v3` transcribes the segment and prints the final text
 - **Filtering** — out-of-language scripts and known Whisper hallucinations are silently dropped
-- **Diarization** *(optional)* — voice embeddings identify who is speaking; speaker changes within a single utterance are shown as `SPEAKER A → SPEAKER B`
+- **Diarization** *(optional)* — voice embeddings identify who is speaking; each segment is attributed to one speaker
 
 ## Requirements
 
@@ -54,6 +54,9 @@ python3 transcribe.py --language Chinese English --save
 # Enable speaker diarization
 python3 transcribe.py --language Chinese English --diarize
 python3 transcribe.py --language Chinese English --diarize --save
+
+# Tune diarization sensitivity (default: 0.85; raise to merge more, lower to split more)
+python3 transcribe.py --language Chinese English --diarize --threshold 0.90
 ```
 
 Press `Ctrl+C` to stop. Saved transcripts are written to `transcript_YYYYMMDD_HHMMSS.txt`.
@@ -93,11 +96,10 @@ Speaker diarization enabled
 
 [new speaker detected: SPEAKER B]
 [22:07:31] SPEAKER B: Right, let me think about that.
-
-[22:07:45] SPEAKER A → SPEAKER B: Sure — go ahead.
+[22:07:45] SPEAKER A: Sure — go ahead.
 ```
 
-Speaker labels (A, B, C, …) are assigned in order of first appearance and are consistent throughout the session.
+Speaker labels (A, B, C, …) are assigned in order of first appearance and remain consistent throughout the session. Tune `--threshold` (default 0.85) if speakers are being over-split or under-split.
 
 ## License
 
