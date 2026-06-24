@@ -142,11 +142,14 @@ class _WaveAnimation:
 class SpeakerTracker:
     """
     Identifies speakers by comparing voice embeddings with cosine similarity.
+    Slides a window across each segment to detect speaker changes within it.
     Assigns consistent labels (SPEAKER A, B, …) within a session.
     """
 
     SAMPLE_RATE = 16000
-    MIN_SECONDS = 0.5   # segments shorter than this are too brief for reliable embedding
+    MIN_SECONDS  = 0.5   # too brief for a reliable embedding
+    WINDOW_SECS  = 1.5   # each analysis window
+    HOP_SECS     = 0.75  # step between windows
 
     def __init__(self, threshold: float = 0.75):
         from resemblyzer import VoiceEncoder
@@ -155,9 +158,25 @@ class SpeakerTracker:
         self._speakers: list[tuple[str, str, np.ndarray]] = []
         self._threshold = threshold
 
+    def _match_or_register(self, embedding: np.ndarray) -> tuple[str, str]:
+        if not self._speakers:
+            return self._register(embedding)
+        similarities = [
+            float(np.dot(embedding, emb) /
+                  (np.linalg.norm(embedding) * np.linalg.norm(emb) + 1e-9))
+            for _, _, emb in self._speakers
+        ]
+        best = int(np.argmax(similarities))
+        if similarities[best] >= self._threshold:
+            label, color, _ = self._speakers[best]
+            return (label, color)
+        return self._register(embedding)
+
     def identify(self, audio_bytes: bytes) -> tuple[str, str]:
         """
-        Return (label, color) for the speaker in audio_bytes.
+        Return (label, color) for the dominant speaker in audio_bytes.
+        If multiple speakers are detected within the segment, returns their
+        labels joined by ' → ' in order of first appearance.
         Returns ("", "") if the audio is too short to embed reliably.
         """
         from resemblyzer import preprocess_wav
@@ -167,23 +186,34 @@ class SpeakerTracker:
             return ("", "")
 
         wav = preprocess_wav(audio, source_sr=self.SAMPLE_RATE)
-        embedding = self._encoder.embed_utterance(wav)
 
-        if not self._speakers:
-            return self._register(embedding)
+        window = int(self.SAMPLE_RATE * self.WINDOW_SECS)
+        hop    = int(self.SAMPLE_RATE * self.HOP_SECS)
 
-        similarities = [
-            float(np.dot(embedding, emb) /
-                  (np.linalg.norm(embedding) * np.linalg.norm(emb) + 1e-9))
-            for _, _, emb in self._speakers
-        ]
-        best = int(np.argmax(similarities))
+        # Segment shorter than one window — embed it whole
+        if len(wav) < window:
+            return self._match_or_register(self._encoder.embed_utterance(wav))
 
-        if similarities[best] >= self._threshold:
-            label, color, _ = self._speakers[best]
-            return (label, color)
+        # Slide across the segment; collect per-window speaker assignments
+        seen: list[tuple[str, str]] = []
+        for start in range(0, len(wav) - window + 1, hop):
+            result = self._match_or_register(
+                self._encoder.embed_utterance(wav[start:start + window])
+            )
+            # Only record a new entry when the speaker changes (consecutive dedup)
+            if not seen or seen[-1] != result:
+                seen.append(result)
 
-        return self._register(embedding)
+        if len(seen) == 1:
+            return seen[0]
+
+        # Multiple speakers — deduplicate globally (keep first-appearance order)
+        unique: list[tuple[str, str]] = []
+        for s in seen:
+            if s not in unique:
+                unique.append(s)
+        label = " → ".join(lbl for lbl, _ in unique)
+        return (label, unique[0][1])
 
     def _register(self, embedding: np.ndarray) -> tuple[str, str]:
         idx = len(self._speakers)
@@ -237,6 +267,7 @@ class Transcriber:
         self._wave = _WaveAnimation()
         self._allowed_ranges = _build_allowed_ranges(language_codes)
         self._audio_buffer: list[bytes] = []
+        self._pending_audio: bytes = b""  # snapshotted at recording stop
         self._speaker_tracker = SpeakerTracker() if diarize else None
         self.output_path = (
             f"transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -264,6 +295,10 @@ class Transcriber:
 
     def _on_recording_stop(self):
         self._wave.stop()
+        # Snapshot the buffer now — _on_recording_start for the *next* utterance
+        # may fire (clearing _audio_buffer) before _on_final is called for this one.
+        self._pending_audio = b"".join(self._audio_buffer)
+        self._audio_buffer.clear()
         print(f"{CLEAR_LINE}{DIM}Processing...{RESET}", end="", flush=True)
 
     def _allowed(self, text: str) -> bool:
@@ -293,8 +328,8 @@ class Transcriber:
         speaker_label = ""
         line_color = GREEN
 
-        if self._speaker_tracker and self._audio_buffer:
-            label, color = self._speaker_tracker.identify(b"".join(self._audio_buffer))
+        if self._speaker_tracker and self._pending_audio:
+            label, color = self._speaker_tracker.identify(self._pending_audio)
             if label:
                 speaker_label = f"{label}: "
                 line_color = color
