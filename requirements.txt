@@ -1,2 +1,3 @@
 RealtimeSTT
 faster-whisper
+resemblyzer
