@@ -142,16 +142,13 @@ class _WaveAnimation:
 class SpeakerTracker:
     """
     Identifies speakers by comparing voice embeddings with cosine similarity.
-    Slides a window across each segment to detect speaker changes within it.
     Assigns consistent labels (SPEAKER A, B, …) within a session.
     """
 
     SAMPLE_RATE = 16000
-    MIN_SECONDS  = 0.5   # too brief for a reliable embedding
-    WINDOW_SECS  = 1.5   # each analysis window
-    HOP_SECS     = 0.75  # step between windows
+    MIN_SECONDS = 0.5   # too brief for a reliable embedding
 
-    def __init__(self, threshold: float = 0.75):
+    def __init__(self, threshold: float = 0.85):
         from resemblyzer import VoiceEncoder
         self._encoder = VoiceEncoder()
         # Each entry: (label, color, embedding)
@@ -174,9 +171,7 @@ class SpeakerTracker:
 
     def identify(self, audio_bytes: bytes) -> tuple[str, str]:
         """
-        Return (label, color) for the dominant speaker in audio_bytes.
-        If multiple speakers are detected within the segment, returns their
-        labels joined by ' → ' in order of first appearance.
+        Return (label, color) for the speaker in audio_bytes.
         Returns ("", "") if the audio is too short to embed reliably.
         """
         from resemblyzer import preprocess_wav
@@ -186,34 +181,7 @@ class SpeakerTracker:
             return ("", "")
 
         wav = preprocess_wav(audio, source_sr=self.SAMPLE_RATE)
-
-        window = int(self.SAMPLE_RATE * self.WINDOW_SECS)
-        hop    = int(self.SAMPLE_RATE * self.HOP_SECS)
-
-        # Segment shorter than one window — embed it whole
-        if len(wav) < window:
-            return self._match_or_register(self._encoder.embed_utterance(wav))
-
-        # Slide across the segment; collect per-window speaker assignments
-        seen: list[tuple[str, str]] = []
-        for start in range(0, len(wav) - window + 1, hop):
-            result = self._match_or_register(
-                self._encoder.embed_utterance(wav[start:start + window])
-            )
-            # Only record a new entry when the speaker changes (consecutive dedup)
-            if not seen or seen[-1] != result:
-                seen.append(result)
-
-        if len(seen) == 1:
-            return seen[0]
-
-        # Multiple speakers — deduplicate globally (keep first-appearance order)
-        unique: list[tuple[str, str]] = []
-        for s in seen:
-            if s not in unique:
-                unique.append(s)
-        label = " → ".join(lbl for lbl, _ in unique)
-        return (label, unique[0][1])
+        return self._match_or_register(self._encoder.embed_utterance(wav))
 
     def _register(self, embedding: np.ndarray) -> tuple[str, str]:
         idx = len(self._speakers)
@@ -260,7 +228,7 @@ def _build_initial_prompt(codes: list[str]) -> str:
 
 class Transcriber:
     def __init__(self, language_codes: list[str], save_to_file: bool = False,
-                 diarize: bool = False):
+                 diarize: bool = False, threshold: float = 0.85):
         self.session_lines: list[tuple[str, str, str]] = []  # (ts, speaker, text)
         self.save_to_file = save_to_file
         self._last_text: str = ""
@@ -268,7 +236,7 @@ class Transcriber:
         self._allowed_ranges = _build_allowed_ranges(language_codes)
         self._audio_buffer: list[bytes] = []
         self._pending_audio: bytes = b""  # snapshotted at recording stop
-        self._speaker_tracker = SpeakerTracker() if diarize else None
+        self._speaker_tracker = SpeakerTracker(threshold=threshold) if diarize else None
         self.output_path = (
             f"transcript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
             if save_to_file else None
@@ -375,6 +343,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save", action="store_true", help="Save transcript to file")
     parser.add_argument("--diarize", action="store_true", help="Enable speaker diarization")
+    parser.add_argument(
+        "--threshold", type=float, default=0.85, metavar="FLOAT",
+        help="Cosine similarity threshold for speaker matching (default: 0.85; "
+             "raise to merge more, lower to split more)",
+    )
     return parser.parse_args()
 
 
@@ -382,4 +355,5 @@ if __name__ == "__main__":
     args = _parse_args()
     codes = _resolve_languages(args.language)
     print(f"Languages: {', '.join(c.upper() for c in codes)}")
-    Transcriber(language_codes=codes, save_to_file=args.save, diarize=args.diarize).run()
+    Transcriber(language_codes=codes, save_to_file=args.save,
+                diarize=args.diarize, threshold=args.threshold).run()
