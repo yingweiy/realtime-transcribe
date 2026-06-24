@@ -10,13 +10,25 @@ Usage:
 
 import argparse
 import itertools
+import os
 import sys
 import threading
 import time
+import warnings
 from datetime import datetime
 from difflib import SequenceMatcher
-from RealtimeSTT import AudioToTextRecorder
 
+# Suppress pkg_resources deprecation warning from webrtcvad (third-party issue)
+warnings.filterwarnings("ignore", category=UserWarning, module="webrtcvad")
+warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+
+# Suppress ctranslate2 float16→float32 warning (harmless on Apple Silicon)
+os.environ.setdefault("CT2_VERBOSE", "0")
+
+import ctranslate2
+ctranslate2.set_log_level(40)  # ERROR — silences WARNING-level messages
+
+from RealtimeSTT import AudioToTextRecorder
 import numpy as np
 
 YELLOW     = "\033[93m"
